@@ -1,0 +1,38 @@
+version: 0.0.1
+type: plugin
+author: r3-yamauchi
+name: dify-kb-kintone-datasource-plugin
+tags:
+  - rag
+label:
+  en_US: dify-kb-kintone-datasource-plugin
+  ja_JP: dify-kb-kintone-datasource-plugin
+  zh_Hans: dify-kb-kintone-datasource-plugin
+  pt_BR: dify-kb-kintone-datasource-plugin
+description:
+  en_US: kintone datasource plugin
+  ja_JP: kintone datasource plugin
+  zh_Hans: kintone datasource plugin
+  pt_BR: kintone datasource plugin
+icon: icon.svg
+icon_dark: icon-dark.svg
+resource:
+  memory: 268435456
+  permission: {}
+plugins:
+  datasources:
+    - provider/dify-kb-kintone-datasource-plugin.yaml
+meta:
+  version: 0.0.1
+  arch:
+    - amd64
+    - arm64
+  runner:
+    language: python
+    version: "3.12"
+    entrypoint: main
+  minimum_dify_version: 1.9.0
+created_at: 2025-10-26T21:43:12.903191+09:00
+privacy: PRIVACY.md
+repo: https://github.com/r3-yamauchi/dify-kb-kintone-datasource-plugin
+verified: false
