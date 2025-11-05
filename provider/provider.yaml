@@ -1,0 +1,92 @@
+identity:
+  name: "kintone_file_datasource"
+  author: "r3-yamauchi"
+  description:
+    en_US: "Configure the kintone domain and API token used by the datasource"
+    zh_Hans: "配置用于数据源的 kintone 域名和 API 令牌"
+    pt_BR: "Configure o domínio e o token API do kintone usados pela fonte de dados"
+    ja_JP: "このデータソースで利用する kintone ドメインと API トークンを設定します"
+  icon: "icon.svg"
+  label:
+    en_US: "kintone app"
+    zh_Hans: "kintone 数据源提供者"
+    pt_BR: "Provedor do kintone"
+    ja_JP: "kintone アプリ"
+description:
+  en_US: "Stores credentials required to talk to the kintone REST API."
+  zh_Hans: "存储访问 kintone REST API 所需的凭证。"
+  pt_BR: "Armazena credenciais necessárias para conversar com a API REST do kintone."
+  ja_JP: "kintone REST API との通信に必要な認証情報を保存します。"
+
+provider_type: online_drive
+
+credentials_schema:
+  - name: kintone_base_url
+    type: text-input
+    required: true
+    label:
+      en_US: kintone Base URL
+      zh_Hans: kintone 基础 URL
+      pt_BR: URL base do kintone
+      ja_JP: kintone ベースURL
+    human_description:
+      en_US: "Example: https://sample.cybozu.com"
+      zh_Hans: "例如：https://sample.cybozu.com"
+      pt_BR: "Exemplo: https://sample.cybozu.com"
+      ja_JP: "例: https://sample.cybozu.com"
+    placeholder:
+      en_US: "https://example.cybozu.com"
+      zh_Hans: "https://example.cybozu.com"
+      pt_BR: "https://example.cybozu.com"
+      ja_JP: "https://example.cybozu.com"
+  - name: kintone_api_token
+    type: secret-input
+    required: true
+    label:
+      en_US: "kintone API Tokens"
+      zh_Hans: "kintone API 令牌"
+      pt_BR: "Tokens de API do kintone"
+      ja_JP: "kintone APIトークン"
+    help:
+      en_US: "Enter 1-9 API tokens separated by commas."
+      zh_Hans: "请输入 1 至 9 个以逗号分隔的 API 令牌（超过 9 个会被拒绝）。"
+      pt_BR: "Informe de 1 a 9 tokens de API separados por vírgulas (mais de 9 serão rejeitados)."
+      ja_JP: "1〜9 個の API トークンをカンマ区切りで入力します（10 個以上はエラー）。"
+    placeholder:
+      en_US: "your-api-token1, api-token2, api-token3"
+      zh_Hans: "your-api-token1, api-token2, api-token3"
+      pt_BR: "your-api-token1, api-token2, api-token3"
+      ja_JP: "your-api-token1, api-token2, api-token3"
+  - name: app_id
+    type: text-input
+    required: true
+    label:
+      en_US: "Default kintone App ID"
+      zh_Hans: "默认 kintone 应用 ID"
+      pt_BR: "App ID padrão do kintone"
+      ja_JP: "既定の kintone アプリID"
+    placeholder:
+      en_US: "e.g. 818"
+      zh_Hans: "例如：818"
+      pt_BR: "ex.: 818"
+      ja_JP: "例: 818"
+  - name: attachment_field_codes
+    type: text-input
+    required: true
+    label:
+      en_US: "Default Attachment Field Codes"
+      zh_Hans: "默认附件字段代码"
+      pt_BR: "Códigos de anexos padrão"
+      ja_JP: "既定の添付フィールドコード"
+    human_description:
+      en_US: "Comma-separated list such as Attachment_A,Attachment_B."
+      zh_Hans: "逗号分隔，例如 Attachment_A,Attachment_B。"
+      pt_BR: "Lista separada por vírgulas, por exemplo Attachment_A,Attachment_B."
+      ja_JP: "Attachment_A,Attachment_B のようにカンマ区切りで指定します。"
+
+datasources:
+  - datasources/datasource.yaml
+
+extra:
+  python:
+    source: provider/provider.py

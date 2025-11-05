@@ -1,19 +1,19 @@
-version: 0.0.1
+version: 0.0.2
 type: plugin
 author: r3-yamauchi
-name: dify-kb-kintone-datasource-plugin
+name: kintone_file_datasource
 tags:
   - rag
 label:
-  en_US: dify-kb-kintone-datasource-plugin
-  ja_JP: dify-kb-kintone-datasource-plugin
-  zh_Hans: dify-kb-kintone-datasource-plugin
-  pt_BR: dify-kb-kintone-datasource-plugin
+  en_US: kintone attachment datasource
+  ja_JP: kintone 添付ファイルデータソース
+  zh_Hans: kintone 附件数据源
+  pt_BR: Fonte de dados de anexos do kintone
 description:
-  en_US: kintone datasource plugin
-  ja_JP: kintone datasource plugin
-  zh_Hans: kintone datasource plugin
-  pt_BR: kintone datasource plugin
+  en_US: Expose kintone app attachments as a Dify online drive datasource, querying records and serving each file for download.
+  ja_JP: kintone アプリの添付ファイルを Dify のオンラインストレージ型データソースとして公開し、レコード検索とファイルダウンロードを可能にします。
+  zh_Hans: 将 kintone 应用中的附件作为 Dify 在线存储数据源对外提供，支持按记录查询并下载每个文件。
+  pt_BR: Disponibiliza os anexos do aplicativo kintone como um datasource de drive on-line no Dify, consultando registros e permitindo baixar cada arquivo.
 icon: icon.svg
 icon_dark: icon-dark.svg
 resource:
@@ -21,9 +21,9 @@ resource:
   permission: {}
 plugins:
   datasources:
-    - provider/dify-kb-kintone-datasource-plugin.yaml
+    - provider/provider.yaml
 meta:
-  version: 0.0.1
+  version: 0.0.2
   arch:
     - amd64
     - arm64
