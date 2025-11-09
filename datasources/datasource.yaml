@@ -10,25 +10,9 @@ description:
   en_US: "Expose kintone attachment files to Dify as an online drive datasource. Fetch files via kintone queries and make them downloadable."
   zh_Hans: "将 kintone 的附件以在线存储的形式同步到 Dify，使其可下载。"
   pt_BR: "Disponibilize anexos do kintone como um drive on-line no Dify, permitindo consulta e download."
-  ja_JP: "kintone の添付ファイルを Dify のオンラインストレージとして公開し、クエリで取得したファイルをダウンロード可能にします。"
+  ja_JP: "kintoneアプリレコードに添付されているファイルを取得可能にします。"
 
 parameters:
-  - name: max_records
-    type: number
-    required: false
-    min: 1
-    max: 5000
-    default: 100
-    label:
-      en_US: Maximum Records
-      zh_Hans: 记录上限
-      pt_BR: Máximo de registros
-      ja_JP: 最大取得件数
-    description:
-      en_US: "Upper bound of records scanned per browse call. The plugin automatically paginates the kintone API (500 items per HTTP request) until this ceiling is reached."
-      zh_Hans: "限制每次浏览时扫描的记录数量。插件会自动分页调用 kintone API（每次请求最多 500 条）直到达到该上限。"
-      pt_BR: "Limite de registros vasculhados por chamada de navegação. O plugin pagina automaticamente a API do kintone (500 itens por requisição) até atingir esse teto."
-      ja_JP: "1 回の browse 呼び出しで走査するレコード数の上限。プラグインが kintone API を自動でページングし（1 リクエスト 500 件）、この上限に達するまで取得します。"
   - name: debug_logging
     type: boolean
     required: false

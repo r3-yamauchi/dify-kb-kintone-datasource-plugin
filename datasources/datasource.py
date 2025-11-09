@@ -1,8 +1,8 @@
-"""Online drive datasource for exposing kintone attachments."""
+"""kintone の添付ファイルを Dify から参照できるオンラインドライブ型データソース。"""
 
 # where: datasources/datasource.py
-# what: Lists and downloads kintone attachment files through Dify's OnlineDriveDatasource interface.
-# why: Enables Dify users to browse and retrieve files stored in kintone apps without duplicating storage.
+# what: Dify の OnlineDriveDatasource 経由で kintone 添付ファイルを列挙・ダウンロードする実装。
+# why: kintone に保存されたファイルを複製せず参照し、Dify から直接取得できるようにするため。
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import time
 from collections.abc import Generator, Mapping
 import hashlib
 from typing import Any, Iterable
@@ -34,53 +35,18 @@ if _DEFAULT_LOG_LEVEL:
     logging.basicConfig(level=getattr(logging, _DEFAULT_LOG_LEVEL.upper(), logging.INFO))
 
 
-def _resolve_page_parameters(page: Any) -> Mapping[str, Any]:
-    """Best-effort extraction of datasource parameters from a page request.
-
-    Retained for backward compatibility with existing unit tests.
-    """
-
-    def _coerce(value: Any) -> Mapping[str, Any]:
-        if isinstance(value, Mapping):
-            return value
-        if isinstance(value, str):
-            try:
-                parsed = json.loads(value)
-            except (TypeError, ValueError):
-                return {}
-            if isinstance(parsed, Mapping):
-                return parsed
-        return {}
-
-    candidates: list[Any] = []
-    for attr in ("datasource_parameters", "parameters", "datasource_parameter"):
-        if hasattr(page, attr):
-            candidates.append(getattr(page, attr))
-
-    datasource = getattr(page, "datasource", None)
-    if datasource is not None:
-        for attr in ("parameters", "datasource_parameters", "datasource_parameter"):
-            if hasattr(datasource, attr):
-                candidates.append(getattr(datasource, attr))
-
-    for candidate in candidates:
-        mapping = _coerce(candidate)
-        if mapping:
-            return mapping
-
-    return {}
-
-
 class KintoneAPIError(RuntimeError):
-    """Raised when the kintone REST API returns an error."""
+    """kintone REST API 呼び出しでエラーが返った場合に送出される例外。"""
 
 
 class KintoneClient:
-    """Minimal HTTP client for the kintone endpoints required by the datasource."""
+    """データソースが利用する最小構成の kintone REST API クライアント。"""
 
-    MAX_CHUNK: int = 500  # official API limit per request
+    MAX_CHUNK: int = 500  # kintone REST API が 1 回で返せるレコード数の上限
+    RETRY_ATTEMPTS: int = 3
+    RETRY_BACKOFF_SECONDS: float = 1.0
 
-    def __init__(self, base_url: str, api_token: str, timeout: int = 15) -> None:
+    def __init__(self, base_url: str, api_token: str, timeout: int = 30) -> None:
         self.api_token = api_token
         self.timeout = timeout
 
@@ -92,37 +58,29 @@ class KintoneClient:
     def fetch_records(
         self,
         app_id: str,
-        user_query: str | None,
-        limit: int,
-        offset: int,
-    ) -> tuple[list[Mapping[str, Any]], int, int]:
-        """Fetch a bounded slice of kintone records and return (records, total_count, next_offset)."""
+        query: str,
+        *,
+        fields: Iterable[str] | None = None,
+    ) -> list[Mapping[str, Any]]:
+        # NOTE: kintone 仕様に合わせて limit/offset を文字列クエリに埋め込むため、ここでは追加パラメータを構築するだけ
+        payload: dict[str, Any] = {
+            "app": app_id,
+            "query": query,
+        }
+        if fields:
+            payload["fields"] = list(fields)
 
-        limit = max(1, min(limit, self.MAX_CHUNK))
-        compound_query = self._compose_query(user_query, limit, offset)
-
-        payload = self._request(
+        response_payload = self._request(
             "GET",
             "/k/v1/records.json",
-            payload={
-                "app": app_id,
-                "query": compound_query,
-                "totalCount": "true",
-            },
+            payload=payload,
         )
 
-        records = payload.get("records", []) if isinstance(payload, Mapping) else []
-
-        total_count_raw = payload.get("totalCount") if isinstance(payload, Mapping) else None
-        try:
-            total_count = int(total_count_raw)
-        except (TypeError, ValueError):
-            total_count = offset + len(records)
-
-        next_offset = offset + len(records)
-        return records, total_count, next_offset
+        records = response_payload.get("records", []) if isinstance(response_payload, Mapping) else []
+        return records
 
     def get_record(self, app_id: str, record_id: str) -> Mapping[str, Any]:
+        # NOTE: 単一レコード取得は kintone API 側で ID を指定するだけなので、そのまま委譲する
         return self._request(
             "GET",
             "/k/v1/record.json",
@@ -130,7 +88,7 @@ class KintoneClient:
         )
 
     def download_file(self, file_key: str) -> bytes:
-        """Download an attachment binary by fileKey."""
+        """fileKey を指定して添付ファイルをダウンロードし、必要に応じてリトライする。"""
 
         url = urljoin(self.base_url + "/", "k/v1/file.json")
         query = urlencode({"fileKey": file_key})
@@ -142,18 +100,45 @@ class KintoneClient:
             },
         )
 
+        # NOTE: 「kintone download ...」という英語ログは添付ダウンロード開始を示す。日本語では「kintone からのダウンロード要求開始」を意味する。
         logger.info("kintone download | file_key=%s", self._mask_secret(file_key))
 
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                return response.read()
-        except HTTPError as exc:
-            error_body = exc.read().decode("utf-8", "ignore")
-            raise KintoneAPIError(
-                f"kintone file download failed with {exc.code}: {error_body or exc.reason}"
-            ) from exc
-        except URLError as exc:  # pragma: no cover - network failures surfaced directly
-            raise KintoneAPIError(f"Failed to reach kintone for file download: {exc.reason}") from exc
+        for attempt in range(self.RETRY_ATTEMPTS):
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    return response.read()
+            except HTTPError as exc:
+                # NOTE: 「kintone download failed ...」は HTTP エラーで再試行する旨を知らせるログ。
+                logger.warning(
+                    "kintone download failed (attempt %s/%s) with HTTP %s",
+                    attempt + 1,
+                    self.RETRY_ATTEMPTS,
+                    getattr(exc, "code", "unknown"),
+                )
+                if self._should_retry_http(exc, attempt):
+                    self._sleep_before_retry(attempt)
+                    continue
+                error_body = exc.read().decode("utf-8", "ignore")
+                # NOTE: エラーメッセージは「HTTP エラーで添付取得に失敗」を意味する。
+                raise KintoneAPIError(
+                    f"kintone file download failed with {exc.code}: {error_body or exc.reason}"
+                ) from exc
+            except URLError as exc:  # pragma: no cover - ネットワーク障害は上位へそのまま伝播させる
+                # NOTE: 「network error」系ログは kintone へ接続できなかったことを通知している。
+                logger.warning(
+                    "kintone download failed (attempt %s/%s) with network error: %s",
+                    attempt + 1,
+                    self.RETRY_ATTEMPTS,
+                    exc.reason,
+                )
+                if self._should_retry_network(attempt):
+                    self._sleep_before_retry(attempt)
+                    continue
+                # NOTE: 「Failed to reach kintone ...」は kintone に到達できず失敗したことを示す日本語訳が必要。
+                raise KintoneAPIError(f"Failed to reach kintone for file download: {exc.reason}") from exc
+
+        # NOTE: 「failed after retries」は「規定回数の再試行後も失敗」を意味する。
+        raise KintoneAPIError("kintone file download failed after retries.")
 
     @staticmethod
     def _mask_secret(secret: str) -> str:
@@ -162,17 +147,6 @@ class KintoneClient:
         if len(secret) <= 6:
             return "***"
         return f"{secret[:3]}***{secret[-3:]}"
-
-    def _compose_query(self, user_query: str | None, limit: int, offset: int) -> str:
-        base = (user_query or "").strip()
-        lower = base.lower()
-        if " limit " in lower or lower.endswith(" limit"):
-            return base
-        clauses = [base] if base else []
-        clauses.append(f"limit {limit}")
-        if offset:
-            clauses.append(f"offset {offset}")
-        return " ".join(filter(None, clauses)).strip()
 
     def _request(
         self,
@@ -191,6 +165,7 @@ class KintoneClient:
 
         request = Request(url=url, data=data, method="POST", headers=headers)
         masked_headers = {**headers, "X-Cybozu-API-Token": "***redacted***"}
+        # NOTE: このログは kintone API への HTTP 呼び出し内容を記録している。
         logger.info(
             "kintone request | method=%s override=%s path=%s payload=%s headers=%s",
             "POST",
@@ -200,39 +175,83 @@ class KintoneClient:
             masked_headers,
         )
 
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                payload = response.read().decode("utf-8")
-        except HTTPError as exc:
-            error_body = exc.read().decode("utf-8", "ignore")
-            raise KintoneAPIError(
-                f"kintone API error {exc.code} for {path}: {error_body or exc.reason}"
-            ) from exc
-        except URLError as exc:  # pragma: no cover - network failures are surfaced directly
-            raise KintoneAPIError(f"Failed to reach kintone: {exc.reason}") from exc
+        for attempt in range(self.RETRY_ATTEMPTS):
+            # NOTE: HTTP ステータスやネットワーク例外に応じて最大 RETRY_ATTEMPTS 回まで再試行
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    payload = response.read().decode("utf-8")
+                return json.loads(payload or "{}")
+            except HTTPError as exc:
+                # NOTE: 「kintone request failed ...」は HTTP レスポンスがエラーとなったことを示す。
+                logger.warning(
+                    "kintone request failed (attempt %s/%s) with HTTP %s",
+                    attempt + 1,
+                    self.RETRY_ATTEMPTS,
+                    getattr(exc, "code", "unknown"),
+                )
+                if self._should_retry_http(exc, attempt):
+                    self._sleep_before_retry(attempt)
+                    continue
+                error_body = exc.read().decode("utf-8", "ignore")
+                # NOTE: 「kintone API error ...」は API からエラー応答が返ったことを示す。
+                raise KintoneAPIError(
+                    f"kintone API error {exc.code} for {path}: {error_body or exc.reason}"
+                ) from exc
+            except URLError as exc:  # pragma: no cover - ネットワーク障害は上位へそのまま伝播させる
+                # NOTE: ネットワーク到達不能を通知するログ。
+                logger.warning(
+                    "kintone request failed (attempt %s/%s) with network error: %s",
+                    attempt + 1,
+                    self.RETRY_ATTEMPTS,
+                    exc.reason,
+                )
+                if self._should_retry_network(attempt):
+                    self._sleep_before_retry(attempt)
+                    continue
+                # NOTE: 「Failed to reach kintone」は接続不能の意。
+                raise KintoneAPIError(f"Failed to reach kintone: {exc.reason}") from exc
 
-        return json.loads(payload or "{}")
+        # NOTE: 「API error after retries」は規定回数の再試行後に失敗し続けたことを示す。
+        raise KintoneAPIError("kintone API error after retries.")
+
+    def _should_retry_http(self, exc: HTTPError, attempt: int) -> bool:
+        return 500 <= getattr(exc, "code", 0) < 600 and attempt + 1 < self.RETRY_ATTEMPTS
+
+    def _should_retry_network(self, attempt: int) -> bool:
+        return attempt + 1 < self.RETRY_ATTEMPTS
+
+    def _sleep_before_retry(self, attempt: int) -> None:
+        delay = self.RETRY_BACKOFF_SECONDS * (attempt + 1)
+        time.sleep(delay)
 
 
 class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
-    """Transforms kintone attachments into a browsable online drive."""
+    """kintone 添付ファイルを Dify から参照できる仮想ドライブとして変換する本体クラス。"""
 
-    DEFAULT_LIMIT = 100
-    MAX_RECORD_SCAN = 5000
+    DEFAULT_LIMIT = 500
 
     def _browse_files(self, request: OnlineDriveBrowseFilesRequest) -> OnlineDriveBrowseFilesResponse:
+        # NOTE: Dify ランタイムから渡される資格情報のみを信頼し、datasource パラメータは debug フラグ以外使わない
+        # NOTE: プラグイン設定（provider credentials + debug flag）のスナップショットを取得
         config = self._gather_configuration()
         app_id = self._resolve_app_id(config, request.bucket)
-        query = self._optional_parameter(config, "query")
+        query = self._optional_parameter(config, "query") or ""
         attachment_codes = self._parse_attachment_field_codes(
             self._require_parameter(config, "attachment_field_codes", aliases=("attachmentFields",))
         )
         if not attachment_codes:
             raise ValueError("attachment_field_codes must contain at least one field code.")
 
-        max_records = self._sanitize_record_limit(config.get("max_records"))
-        max_files = self._determine_page_size(request.max_keys, max_records)
-        offset, attachment_cursor = self._parse_pagination_state(request.next_page_parameters)
+        # NOTE: limit/offset をクエリから剥がして制御しつつ、ORDER BY が無ければ $id 昇順を強制する
+        raw_query, user_limit, user_offset = self._normalize_query(query)
+        base_query = self._ensure_order_clause(raw_query)
+        paginate = user_limit is None
+        request_limit = user_limit if user_limit is not None else KintoneClient.MAX_CHUNK
+        offset = user_offset if user_offset is not None else 0
+        max_files = self._determine_page_size(request.max_keys, self.DEFAULT_LIMIT)
+        offset_from_request, attachment_cursor = self._parse_pagination_state(request.next_page_parameters)
+        if request.next_page_parameters is not None:
+            offset = offset_from_request
         debug_enabled = self._is_debug_enabled(config)
 
         bucket_id = self._compose_bucket_identifier(config, app_id)
@@ -240,9 +259,9 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
             debug_enabled,
             "Starting _browse_files",
             app_id=app_id,
-            query=query,
+            query=base_query,
             attachment_fields=attachment_codes,
-            max_records=max_records,
+            user_limit=user_limit,
             max_files=max_files,
             offset=offset,
             attachment_cursor=attachment_cursor,
@@ -250,35 +269,30 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         )
 
         client = self._build_client(config)
-        files: list[OnlineDriveFile] = []
+        files: list[OnlineDriveFile] = []  # 今回の browse 呼び出しでユーザーに返却するファイル一覧
         next_offset = offset
         next_attachment_cursor = 0
         has_more = False
-        total_count = None
-        initial_offset = offset
-        current_offset = offset
         current_attachment_cursor = attachment_cursor
 
-        def _remaining_record_budget() -> int:
-            return max(0, max_records - (current_offset - initial_offset))
+        fields = self._build_field_selection(attachment_codes)  # 添付フィールドと $id のみ取得してレスポンス量を抑える
 
-        stop_processing = False
-        while len(files) < max_files and _remaining_record_budget() > 0 and not stop_processing:
-            request_limit = min(KintoneClient.MAX_CHUNK, _remaining_record_budget())
+        stop_processing = False  # True になるとループを即座に抜ける（max_files 到達など）
+        records: list[Mapping[str, Any]] = []
+        while len(files) < max_files and not stop_processing:
+            # NOTE: kintone API は limit/offset 句を直接クエリに指定する必要があるため、1 バッチ毎に文字列を生成
+            paged_query = self._compose_paginated_query(base_query, request_limit, offset)
             try:
-                records, batch_total, next_record_offset = client.fetch_records(app_id, query, request_limit, current_offset)
+                records = client.fetch_records(app_id, paged_query, fields=fields)
             except KintoneAPIError as exc:
+                # NOTE: 「Failed to fetch kintone records ...」はレコード取得に失敗した旨を記録する。
                 logger.exception("Failed to fetch kintone records during browse_files")
                 raise ValueError(str(exc)) from exc
 
-            if total_count is None:
-                total_count = batch_total
-
             if not records:
-                current_offset = next_record_offset
                 break
 
-            batch_base_offset = current_offset
+            batch_base_offset = offset
             for index, record in enumerate(records):
                 record_offset = batch_base_offset + index
                 record_id = self._extract_record_id(record)
@@ -305,7 +319,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
                         more_records_remaining = (
                             idx + 1 < len(attachments)
                             or index + 1 < len(records)
-                            or next_record_offset < total_count
+                            or (paginate and len(records) == request_limit)
                         )
                         if idx + 1 < len(attachments):
                             next_offset = record_offset
@@ -319,36 +333,20 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
                 if stop_processing:
                     break
 
-            current_offset = next_record_offset
-            if current_offset == batch_base_offset:
-                # defensive: avoid infinite loop
-                break
-            if total_count is not None and current_offset >= total_count:
-                break
-            if _remaining_record_budget() <= 0:
-                # still more records left overall
-                if total_count is None or current_offset < total_count:
-                    has_more = True
-                break
+            offset = batch_base_offset + len(records)
 
-        if total_count is None:
-            total_count = current_offset
+            if not paginate:
+                # NOTE: ユーザーが limit を明示したら1バッチで終える（kintone_query.py と同じ挙動）
+                break
+            if len(records) < request_limit:
+                break
 
         if not stop_processing and len(files) < max_files:
-            if current_offset < total_count:
-                has_more = True
-                next_offset = current_offset
-                next_attachment_cursor = 0
-            else:
-                has_more = False
-                next_offset = current_offset
-                next_attachment_cursor = 0
-
-        if not files and not has_more:
+            has_more = False
             next_offset = offset
             next_attachment_cursor = 0
 
-        next_page_parameters = None
+        next_page_parameters = None  # has_more の場合にクライアントへ渡す次ページ用カーソル
         if has_more:
             next_page_parameters = {"offset": next_offset}
             if next_attachment_cursor:
@@ -381,6 +379,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         self,
         request: OnlineDriveDownloadFileRequest,
     ) -> Generator[DatasourceMessage, None, None]:
+        # NOTE: browse 時と同じ資格情報を再利用し、アプリ/添付フィールド設定を決定
         config = self._gather_configuration()
         app_id = self._resolve_app_id(config, request.bucket)
         bucket_id = self._compose_bucket_identifier(config, app_id)
@@ -405,10 +404,11 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         try:
             payload = client.get_record(str(app_id), str(record_id))
         except KintoneAPIError as exc:
+            # NOTE: 「Failed to fetch kintone record for download」はダウンロード前のレコード取得失敗を意味する。
             logger.exception("Failed to fetch kintone record for download", extra={"record_id": record_id})
             raise ValueError(str(exc)) from exc
 
-        record = payload.get("record")
+        record = payload.get("record")  # kintone API は record キー配下に本体を返す
         if not isinstance(record, Mapping):
             raise ValueError("kintone record payload is missing from response.")
 
@@ -426,6 +426,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         try:
             blob = client.download_file(file_key)
         except KintoneAPIError as exc:
+            # NOTE: 「Failed to download kintone attachment」は添付ダウンロード失敗を示している。
             logger.exception("Failed to download kintone attachment", extra={"record_id": record_id})
             raise ValueError(str(exc)) from exc
 
@@ -447,40 +448,37 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
             },
         )
 
-    # Helpers -----------------------------------------------------------------
+    # 補助メソッド ------------------------------------------------------------
 
     def _build_client(self, parameters: Mapping[str, Any]) -> KintoneClient:
+        # NOTE: provider 側で必須入力済みの base_url / api_token を解決してクライアントを生成
         base_url = self._resolve_kintone_base_url(parameters)
         api_token = self._resolve_kintone_api_token(parameters)
         return KintoneClient(base_url=base_url, api_token=api_token)
 
     def _gather_configuration(self) -> Mapping[str, Any]:
-        combined: dict[str, Any] = {}
         runtime_state = {
             "runtime_type": type(self.runtime).__name__,
             "has_credentials": hasattr(self.runtime, "credentials"),
             "has_parameters": hasattr(self.runtime, "parameters"),
         }
+        # NOTE: 「Runtime state snapshot」はランタイムの状態をデバッグ出力するログ。
         logger.debug("Runtime state snapshot: %s", runtime_state)
+
+        combined: dict[str, Any] = {}
+        # NOTE: 信頼できるのは provider 側の資格情報なので、まず credentials をコピーする
         credentials = self._ensure_mapping(getattr(self.runtime, "credentials", {}))
         combined.update(credentials)
+
         runtime_params = getattr(self.runtime, "parameters", None)
         if isinstance(runtime_params, Mapping):
-            combined.update(self._ensure_mapping(runtime_params))
+            # NOTE: datasource パラメータでは debug フラグのみ許容する
+            debug_override = runtime_params.get("debug_logging")
+            if debug_override is not None:
+                combined["debug_logging"] = debug_override
         else:
+            # NOTE: 「runtime.parameters is unavailable ...」は datasource パラメータが無いことを示す。
             logger.debug("runtime.parameters is unavailable or not a mapping: %r", runtime_params)
-
-        # Apply provider defaults if overrides are missing
-        defaults_map = (
-            ("app_id", "default_app_id"),
-            ("attachment_field_codes", "default_attachment_field_codes"),
-            ("query", "default_query"),
-            ("max_records", "default_max_records"),
-            ("debug_logging", "default_debug_logging"),
-        )
-        for key, default_key in defaults_map:
-            if key not in combined and default_key in combined and combined[default_key] not in (None, ""):
-                combined[key] = combined[default_key]
 
         return combined
 
@@ -493,26 +491,20 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         if bucket:
             bucket_str = str(bucket).strip()
             if bucket_str and bucket_str != configured:
-                logger.warning("Bucket/app_id mismatch detected: configured=%s requested=%s", configured, bucket_str)
-            if bucket_str:
-                return bucket_str
+                raise ValueError(
+                    "Bucket identifier does not match the configured app_id; per-datasource overrides are not supported."
+                )
         return configured
 
     def _require_parameter(self, parameters: Mapping[str, Any], key: str, *, aliases: tuple[str, ...] = ()) -> str:
         value = self._extract_parameter(parameters, key, aliases=aliases)
         if value is None:
-            runtime_params = getattr(self.runtime, "parameters", None)
-            if isinstance(runtime_params, Mapping):
-                value = self._extract_parameter(runtime_params, key, aliases=aliases)
-        if value is None:
-            credentials_snapshot: Mapping[str, Any] | None = getattr(self.runtime, "credentials", None)
+            # NOTE: 「Required parameter missing ...」は必須パラメータ欠如を明示する。
             logger.error(
-                "Required parameter missing: key=%s aliases=%s parameters=%r runtime=%r credentials=%r",
+                "Required parameter missing: key=%s aliases=%s parameters=%r",
                 key,
                 aliases,
                 parameters,
-                getattr(self.runtime, "parameters", None),
-                credentials_snapshot,
             )
             raise ValueError(f"Parameter '{key}' is required.")
         return value
@@ -527,6 +519,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         return self._extract_parameter(parameters, key, aliases=aliases)
 
     def _join_api_tokens(self, raw_tokens: str) -> str:
+        # NOTE: 最大 9 個まで許容される API トークンを改行区切りへ変換し、kintone API の仕様に合わせる
         tokens = [
             fragment.strip()
             for fragment in re.split(r"[,\n]+", raw_tokens)
@@ -551,6 +544,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         raise ValueError("kintone_api_token must be provided in the datasource configuration.")
 
     def _compose_bucket_identifier(self, parameters: Mapping[str, Any], app_id: str) -> str:
+        # NOTE: kintone ドメインを正規化した値でバケット名を作り、複数アプリを区別する
         base_url = self._resolve_kintone_base_url(parameters)
         parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
         host_path = (parsed.netloc + parsed.path).lower()
@@ -562,15 +556,6 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
             safe = f"kintone_{digest}"
         return f"{safe}_{app_id}"
 
-    def _sanitize_record_limit(self, raw_limit: Any) -> int:
-        try:
-            limit = int(raw_limit or self.DEFAULT_LIMIT)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("max_records must be an integer") from exc
-        if limit <= 0:
-            raise ValueError("max_records must be a positive integer")
-        return min(limit, self.MAX_RECORD_SCAN)
-
     def _determine_page_size(self, requested: int | None, fallback: int) -> int:
         try:
             if requested is None:
@@ -580,16 +565,13 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
             return fallback
 
     def _is_debug_enabled(self, parameters: Mapping[str, Any] | None) -> bool:
-        value: Any | None = None
-        if parameters:
-            value = parameters.get("debug_logging")
-        if value is None:
-            runtime_params = getattr(self.runtime, "parameters", None)
-            if isinstance(runtime_params, Mapping):
-                value = runtime_params.get("debug_logging")
-        return bool(value)
+        if not parameters:
+            return False
+        # NOTE: debug_logging だけは datasource パラメータでオンオフできるよう緩めている
+        return bool(parameters.get("debug_logging"))
 
     def _parse_attachment_field_codes(self, raw_codes: str) -> list[str]:
+        # NOTE: provider 設定で指定されたカンマ区切りフィールドコードを順序維持で正規化
         if not raw_codes:
             return []
         codes = []
@@ -600,7 +582,19 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         return codes
 
     @staticmethod
+    def _build_field_selection(attachment_codes: Iterable[str]) -> list[str]:
+        # NOTE: API レスポンスを最小限に抑えるため、添付フィールドと $id のみ取得する
+        fields: list[str] = []
+        seen: set[str] = set()
+        for candidate in ["$id", *attachment_codes]:
+            if candidate and candidate not in seen:
+                fields.append(candidate)
+                seen.add(candidate)
+        return fields
+
+    @staticmethod
     def _parse_pagination_state(next_page: Mapping[str, Any] | None) -> tuple[int, int]:
+        # NOTE: Dify から渡された next_page_parameters を offset / attachment_cursor に分解
         offset = 0
         cursor = 0
         if isinstance(next_page, Mapping):
@@ -617,6 +611,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         return offset, cursor
 
     def _extract_parameter(self, parameters: Mapping[str, Any], key: str, *, aliases: tuple[str, ...]) -> str | None:
+        # NOTE: snake_case / camelCase / hyphen-case を許容してユースケースの揺れを吸収
         if not isinstance(parameters, Mapping):
             return None
         for candidate in self._candidate_keys(key, aliases):
@@ -641,6 +636,75 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         if hyphenated not in candidates:
             candidates.append(hyphenated)
         return candidates
+
+    @staticmethod
+    def _ensure_order_clause(query: str) -> str:
+        # NOTE: ORDER BY が無いと kintone の返却順が安定しないため、明示的に $id 昇順を付与して決定論的なページングを実現
+        normalized = query.lower()
+        if "order by" in normalized:
+            return query.strip()
+        cleaned = query.strip()
+        if cleaned:
+            return f"{cleaned} order by $id asc"
+        return "order by $id asc"
+
+    @staticmethod
+    def _compose_paginated_query(base_query: str, limit: int, offset: int) -> str:
+        # NOTE: kintone は limit/offset をHTTPボディの query 文字列へ記述する仕様
+        clauses = []
+        cleaned = base_query.strip()
+        if cleaned:
+            clauses.append(cleaned)
+        clauses.append(f"limit {limit}")
+        clauses.append(f"offset {offset}")
+        return " ".join(filter(None, clauses)).strip()
+
+    @staticmethod
+    def _remove_trailing_connectors(query: str) -> str:
+        cleaned = query
+        while True:
+            stripped = re.sub(r"\s+", " ", cleaned).strip()
+            if not stripped:
+                return ""
+            if re.search(r"(and|or)$", stripped, flags=re.IGNORECASE):
+                cleaned = re.sub(r"(and|or)\s*$", "", stripped, flags=re.IGNORECASE)
+                continue
+            return stripped
+
+    def _normalize_query(self, raw_query: str) -> tuple[str, int | None, int | None]:
+        query = (raw_query or "").strip()
+        if not query:
+            return "", None, None
+
+        normalized = re.sub(r"\s+", " ", query)
+        tokens = normalized.split(" ")
+        lower_tokens = [token.lower() for token in tokens]
+        if lower_tokens.count("limit") > 1 or lower_tokens.count("offset") > 1:
+            raise ValueError("Query may contain at most one limit and one offset clause.")
+
+        # NOTE: kintone_query.py と同様に limit/offset を取り除き、我々側でページネーションを制御する
+        limit_match = re.search(r"\blimit\s+(\d+)", query, flags=re.IGNORECASE)
+        user_limit: int | None = None
+        if limit_match:
+            user_limit = int(limit_match.group(1))
+            if user_limit <= 0:
+                raise ValueError("Query limit must be a positive integer.")
+            if user_limit > KintoneClient.MAX_CHUNK:
+                raise ValueError(
+                    f"Query limit cannot exceed {KintoneClient.MAX_CHUNK}; omit the clause to fetch all records."
+                )
+            query = re.sub(r"\blimit\s+\d+", "", query, flags=re.IGNORECASE)
+
+        offset_match = re.search(r"\boffset\s+(\d+)", query, flags=re.IGNORECASE)
+        user_offset: int | None = None
+        if offset_match:
+            user_offset = int(offset_match.group(1))
+            if user_offset < 0:
+                raise ValueError("Query offset must be zero or a positive integer.")
+            query = re.sub(r"\boffset\s+\d+", "", query, flags=re.IGNORECASE)
+
+        query = self._remove_trailing_connectors(query)
+        return query, user_limit, user_offset
 
     @staticmethod
     def _extract_record_id(record: Mapping[str, Any]) -> str:
@@ -684,6 +748,7 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         attachment_codes: Iterable[str],
         file_key: str,
     ) -> dict[str, Any] | None:
+        # NOTE: 添付フィールド全体を走査し、fileKey が一致するエントリを返す
         for attachment in self._extract_attachments(record, attachment_codes):
             if attachment["fileKey"] == file_key:
                 return attachment
@@ -723,6 +788,8 @@ class DifyKbKintoneDatasourcePluginDataSource(OnlineDriveDatasource):
         if not enabled:
             return
         if extra:
+            # NOTE: デバッグログ「[debug] ... extra=...」は付加情報つきで状況を記録する。
             logger.info("[debug] %s | extra=%s", message, extra)
         else:
+            # NOTE: 追加情報の無いデバッグログ。
             logger.info("[debug] %s", message)

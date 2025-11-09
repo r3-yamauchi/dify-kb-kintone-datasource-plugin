@@ -31,7 +31,7 @@ credentials_schema:
       ja_JP: kintone ベースURL
     human_description:
       en_US: "Example: https://sample.cybozu.com"
-      zh_Hans: "例如：https://sample.cybozu.com"
+      zh_Hans: "例如: https://sample.cybozu.com"
       pt_BR: "Exemplo: https://sample.cybozu.com"
       ja_JP: "例: https://sample.cybozu.com"
     placeholder:
@@ -51,7 +51,7 @@ credentials_schema:
       en_US: "Enter 1-9 API tokens separated by commas."
       zh_Hans: "请输入 1 至 9 个以逗号分隔的 API 令牌（超过 9 个会被拒绝）。"
       pt_BR: "Informe de 1 a 9 tokens de API separados por vírgulas (mais de 9 serão rejeitados)."
-      ja_JP: "1〜9 個の API トークンをカンマ区切りで入力します（10 個以上はエラー）。"
+      ja_JP: "API トークンを最大9個までカンマ区切りで入力します（10 個以上はエラー）。"
     placeholder:
       en_US: "your-api-token1, api-token2, api-token3"
       zh_Hans: "your-api-token1, api-token2, api-token3"
@@ -64,12 +64,12 @@ credentials_schema:
       en_US: "Default kintone App ID"
       zh_Hans: "默认 kintone 应用 ID"
       pt_BR: "App ID padrão do kintone"
-      ja_JP: "既定の kintone アプリID"
+      ja_JP: "対象の kintone アプリID"
     placeholder:
-      en_US: "e.g. 818"
-      zh_Hans: "例如：818"
-      pt_BR: "ex.: 818"
-      ja_JP: "例: 818"
+      en_US: "e.g. 999"
+      zh_Hans: "例如: 999"
+      pt_BR: "ex.: 999"
+      ja_JP: "例: 999"
   - name: attachment_field_codes
     type: text-input
     required: true
@@ -77,12 +77,25 @@ credentials_schema:
       en_US: "Default Attachment Field Codes"
       zh_Hans: "默认附件字段代码"
       pt_BR: "Códigos de anexos padrão"
-      ja_JP: "既定の添付フィールドコード"
+      ja_JP: "取得対象の添付ファイル・フィールドのフィールドコード"
     human_description:
       en_US: "Comma-separated list such as Attachment_A,Attachment_B."
       zh_Hans: "逗号分隔，例如 Attachment_A,Attachment_B。"
       pt_BR: "Lista separada por vírgulas, por exemplo Attachment_A,Attachment_B."
       ja_JP: "Attachment_A,Attachment_B のようにカンマ区切りで指定します。"
+  - name: query
+    type: text-input
+    required: false
+    label:
+      en_US: "kintone Query"
+      zh_Hans: "kintone 查询"
+      pt_BR: "Consulta kintone"
+      ja_JP: "kintone クエリ"
+    human_description:
+      en_US: "Optional kintone query string."
+      zh_Hans: "可选的 kintone 查询语句。"
+      pt_BR: "Consulta opcional do kintone."
+      ja_JP: "任意の kintone クエリ文字列"
 
 datasources:
   - datasources/datasource.yaml

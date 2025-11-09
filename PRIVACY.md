@@ -5,21 +5,24 @@ The kintone plugin respects user privacy and handles data with care. Here's what
 ## Data Collection
 
 - **kintone Domain/App ID/API Token:** The required credentials are your kintone domain, kintone app ID, and an API token with granted view permissions.
-- **Request Destination:** kintone REST API: `https://{kintone-domain}/k/v1/records.json`
+- **Request Destinations:** kintone REST API endpoints:
+  - `https://{kintone-domain}/k/v1/records.json` (record listing)
+  - `https://{kintone-domain}/k/v1/record.json` (single record retrieval)
+  - `https://{kintone-domain}/k/v1/file.json` (file download)
 - **Request Content:** A query string specifying filtering conditions for kintone records and the fields to retrieve. Both are optional; if not specified, all records and all fields in the target app will be retrieved.
 - **No Personal Data Collection:** We do not collect or store any personal user data.
 
 ## Data Usage
 
-- The kintone domain, app ID, and API token are used solely for sending requests to [the kintone REST API to retrieve multiple specified kintone records](https://kintone.dev/en/docs/kintone/rest-api/records/get-records/) .
-- Message content is only used for delivery and is not stored or logged.
+- The kintone domain, app ID, and API token are used solely for sending requests to the kintone REST API to retrieve records and download attached files.
+- Retrieved file content is transmitted to Dify knowledge base for processing and is not stored or logged by this plugin.
 - All communication is done through kintone's official API endpoints.
 
 ## Data Storage
 
 - No data is permanently stored by this plugin.
 - Credentials are stored securely by the Dify platform.
-- Message content is transmitted only and not retained.
+- Retrieved file content is transmitted to Dify knowledge base and stored according to Dify's data retention policies.
 
 ## Third-party Services
 
